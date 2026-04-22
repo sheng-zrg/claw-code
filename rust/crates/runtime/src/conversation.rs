@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
+use std::time::Instant;
 
 use serde_json::{Map, Value};
 use telemetry::SessionTracer;
@@ -113,6 +114,7 @@ pub struct TurnSummary {
     pub prompt_cache_events: Vec<PromptCacheEvent>,
     pub iterations: usize,
     pub usage: TokenUsage,
+    pub elapsed_ms: u64,
     pub auto_compaction: Option<AutoCompactionEvent>,
 }
 
@@ -317,7 +319,8 @@ where
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
         let user_input = user_input.into();
-
+        let start_instant = Instant::now();
+        
         // ROADMAP #38: Session-health canary - probe if context was compacted
         if self.session.compaction.is_some() {
             if let Err(error) = self.run_session_health_probe() {
@@ -501,12 +504,14 @@ where
 
         let auto_compaction = self.maybe_auto_compact();
 
+        let elapsed_ms = start_instant.elapsed().as_millis() as u64;
         let summary = TurnSummary {
             assistant_messages,
             tool_results,
             prompt_cache_events,
             iterations,
             usage: self.usage_tracker.cumulative_usage(),
+            elapsed_ms,
             auto_compaction,
         };
         self.record_turn_completed(&summary);
@@ -586,6 +591,15 @@ where
         attributes.insert(
             "user_input".to_string(),
             Value::String(user_input.to_string()),
+        );
+        let usage_before = self.usage_tracker.cumulative_usage();
+        attributes.insert(
+            "input_tokens_before".to_string(),
+            Value::from(usage_before.input_tokens as u64),
+        );
+        attributes.insert(
+            "output_tokens_before".to_string(),
+            Value::from(usage_before.output_tokens as u64),
         );
         session_tracer.record("turn_started", attributes);
     }
@@ -670,6 +684,32 @@ where
             "prompt_cache_events".to_string(),
             Value::from(summary.prompt_cache_events.len() as u64),
         );
+        attributes.insert(
+            "input_tokens".to_string(),
+            Value::from(summary.usage.input_tokens as u64),
+        );
+        attributes.insert(
+            "output_tokens".to_string(),
+            Value::from(summary.usage.output_tokens as u64),
+        );
+        attributes.insert(
+            "total_tokens".to_string(),
+            Value::from(summary.usage.total_tokens() as u64),
+        );
+        attributes.insert(
+            "cache_write_tokens".to_string(),
+            Value::from(summary.usage.cache_creation_input_tokens as u64),
+        );
+        attributes.insert(
+            "cache_read_tokens".to_string(),
+            Value::from(summary.usage.cache_read_input_tokens as u64),
+        );
+        let cost = summary.usage.estimate_cost_usd();
+        attributes.insert(
+            "estimated_cost_usd".to_string(),
+            Value::from(cost.total_cost_usd()),
+        );
+        attributes.insert("elapsed_ms".to_string(), Value::from(summary.elapsed_ms));
         session_tracer.record("turn_completed", attributes);
     }
 
@@ -983,6 +1023,19 @@ mod tests {
             .expect("conversation loop should succeed");
 
         let events = sink.events();
+
+        let turn_started_attrs = events.iter().find_map(|event| match event {
+            TelemetryEvent::SessionTrace(trace) if trace.name == "turn_started" => {
+                Some(trace.attributes.clone())
+            }
+            _ => None,
+        });
+        assert!(turn_started_attrs.is_some());
+        let start_attrs = turn_started_attrs.unwrap();
+        assert!(start_attrs.contains_key("user_input"));
+        assert!(start_attrs.contains_key("input_tokens_before"));
+        assert!(start_attrs.contains_key("output_tokens_before"));
+
         let trace_names = events
             .iter()
             .filter_map(|event| match event {
@@ -996,6 +1049,43 @@ mod tests {
         assert!(trace_names.contains(&"tool_execution_started"));
         assert!(trace_names.contains(&"tool_execution_finished"));
         assert!(trace_names.contains(&"turn_completed"));
+    }
+
+    #[test]
+    fn records_token_usage_and_timing_in_telemetry() {
+        let sink = Arc::new(MemoryTelemetrySink::default());
+        let tracer = SessionTracer::new("session-timing", sink.clone());
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            ScriptedApiClient { call_count: 0 },
+            StaticToolExecutor::new().register("add", |_input| Ok("4".to_string())),
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+            vec!["system".to_string()],
+        )
+        .with_session_tracer(tracer);
+
+        runtime
+            .run_turn("what is 2 + 2?", Some(&mut PromptAllowOnce))
+            .expect("conversation loop should succeed");
+
+        let events = sink.events();
+        let turn_completed = events.iter().find_map(|event| match event {
+            TelemetryEvent::SessionTrace(trace) if trace.name == "turn_completed" => {
+                Some(trace.attributes.clone())
+            }
+            _ => None,
+        });
+
+        assert!(turn_completed.is_some(), "should have turn_completed event");
+        let attributes = turn_completed.unwrap();
+
+        assert!(attributes.contains_key("input_tokens"));
+        assert!(attributes.contains_key("output_tokens"));
+        assert!(attributes.contains_key("total_tokens"));
+        assert!(attributes.contains_key("cache_write_tokens"));
+        assert!(attributes.contains_key("cache_read_tokens"));
+        assert!(attributes.contains_key("estimated_cost_usd"));
+        assert!(attributes.contains_key("elapsed_ms"));
     }
 
     #[test]

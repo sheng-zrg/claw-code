@@ -206,7 +206,7 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
             default_base_url: openai_compat::DEFAULT_DASHSCOPE_BASE_URL,
         });
     }
-    // Kimi models (kimi-k2.5, kimi-k1.5, etc.) via DashScope compatible-mode.
+        // Kimi models (kimi-k2.5, kimi-k1.5, etc.) via DashScope compatible-mode.
     // Routes kimi/* and kimi-* model names to DashScope endpoint.
     if canonical.starts_with("kimi/") || canonical.starts_with("kimi-") {
         return Some(ProviderMetadata {
@@ -214,6 +214,18 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
             auth_env: "DASHSCOPE_API_KEY",
             base_url_env: "DASHSCOPE_BASE_URL",
             default_base_url: openai_compat::DEFAULT_DASHSCOPE_BASE_URL,
+        });
+    }
+    
+    // Catch-all for local Qwen models without explicit prefix (e.g., "Qwen3.5-35B-A3B-UD-Q4_K_XL").
+    // These models also speak the OpenAI wire format and should be routed to the OpenAI-compatible
+    // client. The user must set OPENAI_BASE_URL to point at their local server (Ollama, vLLM, etc.).
+    if canonical.starts_with("qwen") {
+        return Some(ProviderMetadata {
+            provider: ProviderKind::OpenAi,
+            auth_env: "OPENAI_API_KEY",
+            base_url_env: "OPENAI_BASE_URL",
+            default_base_url: openai_compat::DEFAULT_OPENAI_BASE_URL,
         });
     }
     None
@@ -552,63 +564,89 @@ mod tests {
         assert_eq!(kind2, ProviderKind::OpenAi);
     }
 
-    #[test]
-    fn qwen_prefix_routes_to_dashscope_not_anthropic() {
-        // User request from Discord #clawcode-get-help: web3g wants to use
-        // Qwen 3.6 Plus via native Alibaba DashScope API (not OpenRouter,
-        // which has lower rate limits). metadata_for_model must route
-        // qwen/* and bare qwen-* to the OpenAi provider kind pointed at
-        // the DashScope compatible-mode endpoint, regardless of whether
-        // ANTHROPIC_API_KEY is present in the environment.
-        let meta = super::metadata_for_model("qwen/qwen-max")
-            .expect("qwen/ prefix must resolve to DashScope metadata");
-        assert_eq!(meta.provider, ProviderKind::OpenAi);
-        assert_eq!(meta.auth_env, "DASHSCOPE_API_KEY");
-        assert_eq!(meta.base_url_env, "DASHSCOPE_BASE_URL");
-        assert!(meta.default_base_url.contains("dashscope.aliyuncs.com"));
+ #[test]
+   fn qwen_prefix_routes_to_dashscope_not_anthropic() {
+       // User request from Discord #clawcode-get-help: web3g wants to use
+       // Qwen 3.6 Plus via native Alibaba DashScope API (not OpenRouter,
+       // which has lower rate limits). metadata_for_model must route
+       // qwen/* and bare qwen-* to the OpenAi provider kind pointed at
+       // the DashScope compatible-mode endpoint, regardless of whether
+       // ANTHROPIC_API_KEY is present in the environment.
+       let meta = super::metadata_for_model("qwen/qwen-max")
+           .expect("qwen/ prefix must resolve to DashScope metadata");
+       assert_eq!(meta.provider, ProviderKind::OpenAi);
+       assert_eq!(meta.auth_env, "DASHSCOPE_API_KEY");
+       assert_eq!(meta.base_url_env, "DASHSCOPE_BASE_URL");
+       assert!(meta.default_base_url.contains("dashscope.aliyuncs.com"));
 
-        // Bare qwen- prefix also routes
-        let meta2 = super::metadata_for_model("qwen-plus")
-            .expect("qwen- prefix must resolve to DashScope metadata");
-        assert_eq!(meta2.provider, ProviderKind::OpenAi);
-        assert_eq!(meta2.auth_env, "DASHSCOPE_API_KEY");
+       // Bare qwen- prefix also routes
+       let meta2 = super::metadata_for_model("qwen-plus")
+           .expect("qwen- prefix must resolve to DashScope metadata");
+       assert_eq!(meta2.provider, ProviderKind::OpenAi);
+       assert_eq!(meta2.auth_env, "DASHSCOPE_API_KEY");
 
-        // detect_provider_kind must agree even if ANTHROPIC_API_KEY is set
-        let kind = detect_provider_kind("qwen/qwen3-coder");
-        assert_eq!(
-            kind,
-            ProviderKind::OpenAi,
-            "qwen/ prefix must win over auth-sniffer order"
-        );
-    }
+       // detect_provider_kind must agree even if ANTHROPIC_API_KEY is set
+       let kind = detect_provider_kind("qwen/qwen3-coder");
+       assert_eq!(
+           kind,
+           ProviderKind::OpenAi,
+           "qwen/ prefix must win over auth-sniffer order"
+       );
+   }
 
-    #[test]
-    fn kimi_prefix_routes_to_dashscope() {
-        // Kimi models via DashScope (kimi-k2.5, kimi-k1.5, etc.)
-        let meta = super::metadata_for_model("kimi-k2.5")
-            .expect("kimi-k2.5 must resolve to DashScope metadata");
-        assert_eq!(meta.auth_env, "DASHSCOPE_API_KEY");
-        assert_eq!(meta.base_url_env, "DASHSCOPE_BASE_URL");
-        assert!(meta.default_base_url.contains("dashscope.aliyuncs.com"));
-        assert_eq!(meta.provider, ProviderKind::OpenAi);
+   #[test]
+   fn kimi_prefix_routes_to_dashscope() {
+       // Kimi models via DashScope (kimi-k2.5, kimi-k1.5, etc.)
+       let meta = super::metadata_for_model("kimi-k2.5")
+           .expect("kimi-k2.5 must resolve to DashScope metadata");
+       assert_eq!(meta.auth_env, "DASHSCOPE_API_KEY");
+       assert_eq!(meta.base_url_env, "DASHSCOPE_BASE_URL");
+       assert!(meta.default_base_url.contains("dashscope.aliyuncs.com"));
+       assert_eq!(meta.provider, ProviderKind::OpenAi);
 
-        // With provider prefix
-        let meta2 = super::metadata_for_model("kimi/kimi-k2.5")
-            .expect("kimi/kimi-k2.5 must resolve to DashScope metadata");
-        assert_eq!(meta2.auth_env, "DASHSCOPE_API_KEY");
-        assert_eq!(meta2.provider, ProviderKind::OpenAi);
+       // With provider prefix
+       let meta2 = super::metadata_for_model("kimi/kimi-k2.5")
+           .expect("kimi/kimi-k2.5 must resolve to DashScope metadata");
+       assert_eq!(meta2.auth_env, "DASHSCOPE_API_KEY");
+       assert_eq!(meta2.provider, ProviderKind::OpenAi);
 
-        // Different kimi variants
-        let meta3 = super::metadata_for_model("kimi-k1.5")
-            .expect("kimi-k1.5 must resolve to DashScope metadata");
-        assert_eq!(meta3.auth_env, "DASHSCOPE_API_KEY");
-    }
+       // Different kimi variants
+       let meta3 = super::metadata_for_model("kimi-k1.5")
+           .expect("kimi-k1.5 must resolve to DashScope metadata");
+       assert_eq!(meta3.auth_env, "DASHSCOPE_API_KEY");
+   }
 
-    #[test]
-    fn kimi_alias_resolves_to_kimi_k2_5() {
-        assert_eq!(super::resolve_model_alias("kimi"), "kimi-k2.5");
-        assert_eq!(super::resolve_model_alias("KIMI"), "kimi-k2.5"); // case insensitive
-    }
+   #[test]
+   fn kimi_alias_resolves_to_kimi_k2_5() {
+       assert_eq!(super::resolve_model_alias("kimi"), "kimi-k2.5");
+       assert_eq!(super::resolve_model_alias("KIMI"), "kimi-k2.5"); // case insensitive
+   }
+   
+   #[test]
+   fn qwen_models_without_prefix_route_to_openai() {
+       // Regression test: local Qwen models without explicit prefix (e.g.,
+       // "Qwen3.5-35B-A3B-UD-Q4_K_XL" from Ollama) should route to OpenAi
+       // provider when OPENAI_BASE_URL is configured, not Anthropic.
+       let _lock = env_lock();
+       let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", None);
+       let _dashscope = EnvVarGuard::set("DASHSCOPE_API_KEY", None);
+       let _base_url = EnvVarGuard::set("OPENAI_BASE_URL", Some("http://localhost:11434/v1"));
+       let _api_key = EnvVarGuard::set("OPENAI_API_KEY", Some("ollama"));
+
+       // Models starting with "qwen" (case-insensitive) should route to OpenAi
+       let kind1 = detect_provider_kind("Qwen3.5-35B-A3B-UD-Q4_K_XL");
+       assert_eq!(kind1, ProviderKind::OpenAi,
+           "Qwen3.5 local model should route to OpenAi when OPENAI_BASE_URL is set");
+
+       let kind2 = detect_provider_kind("qwen3.5-coder:7b");
+       assert_eq!(kind2, ProviderKind::OpenAi,
+           "qwen3.5-coder:7b should route to OpenAi when OPENAI_BASE_URL is set");
+
+       // Bare "qwen" prefix without dash should also work
+       let kind3 = detect_provider_kind("qwen-max");
+       assert_eq!(kind3, ProviderKind::OpenAi,
+           "qwen-max without prefix should route to DashScope metadata");
+   }
 
     #[test]
     fn keeps_existing_max_token_heuristic() {
